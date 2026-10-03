@@ -1,12 +1,5 @@
-"""PresentSir demo backend (stateless).
-
-State lives in Upstash Redis when UPSTASH_REDIS_REST_URL / _TOKEN (or Vercel's KV_REST_API_URL / _TOKEN)
-are set; otherwise it falls back to in-memory storage (fine for a single laptop process).
-Login tokens are signed (HMAC), so any server instance can verify them.
-Run locally: uvicorn main:app --host 0.0.0.0 --port 8000
-"""
-import base64, hashlib, hmac, json, os, random, secrets, time, urllib.request
-from datetime import datetime, timedelta, timezone
+"""PresentSir demo backend. Run: uvicorn main:app --host 0.0.0.0 --port 8000"""
+import base64, hashlib, hmac, json, random, secrets, time
 from pathlib import Path
 
 import segno
@@ -17,56 +10,27 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+ROTATE = 10
 BASE = Path(__file__).parent
-SECRET = (os.environ.get("APP_SECRET") or "presentsir-demo-secret").encode()  # set APP_SECRET for real use
-IST = timezone(timedelta(hours=5, minutes=30))
-RURL = os.environ.get("UPSTASH_REDIS_REST_URL") or os.environ.get("KV_REST_API_URL")
-RTOK = os.environ.get("UPSTASH_REDIS_REST_TOKEN") or os.environ.get("KV_REST_API_TOKEN")
+DB = BASE / "devices.json"
+SECRET = secrets.token_bytes(32)
 
-# Student table (login id, name, roll no). Password for everyone: 1234
-NAMES = [("ayush", "Ayush Mane", "A45"), ("ashish", "Ashish Warang", "A47"),
-         ("pushkar", "Pushkar Mahadik", "A29"), ("arshad", "Arshad Mahalkari", "A03"),
-         ("riya", "Riya Patil", "A12"), ("karan", "Karan Shah", "A31"),
-         ("sneha", "Sneha Jadhav", "A07"), ("omkar", "Omkar Patil", "A22"),
-         ("pooja", "Pooja Kulkarni", "A38"), ("neha", "Neha Shinde", "A16")]
+NAMES = [("ayush", "Ayush Mane", "A45"), ("riya", "Riya Patil", "A12"), ("karan", "Karan Shah", "A31"),
+         ("sneha", "Sneha Jadhav", "A07"), ("omkar", "Omkar Patil", "A22"), ("pooja", "Pooja Kulkarni", "A38"),
+         ("rahul", "Rahul Deshmukh", "A41"), ("neha", "Neha Shinde", "A16")]
 USERS = {l: {"password": "1234", "name": n, "uid": u} for l, n, u in NAMES}
 ROSTER = sorted(USERS.values(), key=lambda u: u["uid"])
-LOGIN_BY_UID = {u["uid"]: l for l, u in USERS.items()}
 COURSES = [{"id": 1, "name": "Android App Development", "code": "231CSEOECL302", "faculty": "Dr. Sunny Baburao Mohite"},
            {"id": 2, "name": "Cloud Computing", "code": "231AIMLPCCL303", "faculty": "Ms. Snehalata Krishnakant Choudhari"},
            {"id": 3, "name": "Database Engineering", "code": "231AIMLPCCL302", "faculty": "Ms. Priyanka Ramesh Bhatmare"}]
+DEVICES: dict = json.loads(DB.read_text()) if DB.exists() else {}
+TOKENS: dict = {}
+SESSIONS: dict = {}
+PLAN: list = []
+NONCES: set = set()
+NID = {"s": 4800, "p": 0}
 
 app = FastAPI(title="PresentSir demo")
-
-
-# ---------------- storage ----------------
-class MemStore:
-    def __init__(self):
-        self.d = {}
-
-    def cmd(self, op, k, *r):
-        d = self.d
-        if op == "GET": return d.get(k)
-        if op == "SET":
-            if "NX" in r and k in d: return None
-            d[k] = r[0]; return "OK"
-        if op == "DEL": return int(d.pop(k, None) is not None)
-        if op == "HSET": d.setdefault(k, {})[r[0]] = r[1]; return 1
-        if op == "HSETNX":
-            h = d.setdefault(k, {})
-            if r[0] in h: return 0
-            h[r[0]] = r[1]; return 1
-        if op == "HGET": return d.get(k, {}).get(r[0])
-        if op == "HEXISTS": return int(r[0] in d.get(k, {}))
-        if op == "HGETALL": return [x for kv in d.get(k, {}).items() for x in kv]
-        if op == "SADD":
-            s = d.setdefault(k, set()); new = int(r[0] not in s); s.add(r[0]); return new
-        if op == "LPUSH": d.setdefault(k, []).insert(0, r[0]); return len(d[k])
-        if op == "LRANGE": return list(d.get(k, []))
-        raise ValueError(op)
-
-
-MEM = MemStore()
 
 
 class ApiError(Exception):
@@ -79,164 +43,6 @@ async def _err(_: Request, e: ApiError):
     return JSONResponse(status_code=e.status, content={"code": e.code, "message": e.message})
 
 
-def cmd(*a):
-    if not RURL:
-        return MEM.cmd(*a)
-    req = urllib.request.Request(RURL, data=json.dumps([str(x) for x in a]).encode(),
-                                 headers={"Authorization": "Bearer " + RTOK, "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read())["result"]
-    except Exception:
-        raise ApiError("STORE_ERROR", "Storage is unavailable", 503)
-
-
-def hgetall(k):
-    f = cmd("HGETALL", k) or []
-    return {f[i]: json.loads(f[i + 1]) for i in range(0, len(f), 2)}
-
-
-def get_scans(sid):
-    return sorted(hgetall(f"ps:scans:{sid}").values(), key=lambda x: x["time"])
-
-
-def get_alerts(sid):
-    return [json.loads(x) for x in cmd("LRANGE", f"ps:alerts:{sid}", 0, -1) or []]
-
-
-def get_device(login):
-    raw = cmd("HGET", "ps:devices", login)
-    return json.loads(raw) if raw else None
-
-
-# ---------------- sessions / plan live in one JSON document ----------------
-def hms() -> str:
-    return datetime.now(IST).strftime("%H:%M:%S")
-
-
-def to_min(hhmm):
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
-
-
-def to_hhmm(mins):
-    return f"{mins // 60:02d}:{mins % 60:02d}"
-
-
-def new_session(M, cid, topic, date, plan_id=None, status="SCHEDULED", start="10:00", end="11:00", rot=10, win=120):
-    M["nid"]["s"] += 1
-    s = {"id": M["nid"]["s"], "course_id": cid, "topic": topic, "date": date, "plan_id": plan_id,
-         "start_time": start, "end_time": end, "rotation_seconds": rot, "window_seconds": win,
-         "status": status, "records": {}, "log": []}
-    M["sessions"][str(s["id"])] = s
-    return s
-
-
-def seed():
-    rnd = random.Random(7)
-    M = {"sessions": {}, "plan": [], "nid": {"s": 4800, "p": 0}}
-    topics = ["Introduction", "Activities and Intents", "Jetpack Compose basics", "Navigation", "Networking"]
-    for cid in (1, 2, 3):
-        for i, t in enumerate(topics):
-            s = new_session(M, cid, t, f"2026-09-{8 + i * 3:02d}", status="SUBMITTED",
-                            start=f"{8 + cid:02d}:00", end=f"{9 + cid:02d}:00")
-            for u in ROSTER:
-                p = rnd.random() < (0.55 if u["uid"] in ("A07", "A22") else 0.88)
-                s["records"][u["uid"]] = {"status": "PRESENT" if p else "ABSENT",
-                                          "source": "SCAN" if p else "SYSTEM", "reason": "", "at": "10:05:00"}
-    for c in COURSES:
-        for n, t in enumerate(["Unit 1 overview", "Unit 2 concepts", "Case study", "Revision"], 1):
-            M["nid"]["p"] += 1
-            M["plan"].append({"id": M["nid"]["p"], "course_id": c["id"], "no": n, "topic": t,
-                              "planned_date": f"2026-10-{n * 4:02d}", "status": "DONE" if n == 1 else "PLANNED"})
-    return M
-
-
-def meta():
-    raw = cmd("GET", "ps:meta")
-    if not raw:
-        cmd("SET", "ps:meta", json.dumps(seed()), "NX")
-        raw = cmd("GET", "ps:meta")
-    return json.loads(raw)
-
-
-def save(M):
-    cmd("SET", "ps:meta", json.dumps(M))
-
-
-def course(cid):
-    return next(c for c in COURSES if c["id"] == cid)
-
-
-def sess(M, sid):
-    s = M["sessions"].get(str(sid))
-    if not s:
-        raise ApiError("NOT_FOUND", "Session not found", 404)
-    return s
-
-
-def open_session(M):
-    return next((s for s in M["sessions"].values() if s["status"] == "OPEN"), None)
-
-
-def summary(s):
-    if s["records"]:
-        pres = sum(r["status"] == "PRESENT" for r in s["records"].values())
-    else:
-        pres = len(get_scans(s["id"])) if s["status"] == "OPEN" else 0
-    c = course(s["course_id"])
-    return {"id": s["id"], "course_id": c["id"], "course": c["name"], "code": c["code"], "date": s["date"],
-            "topic": s["topic"], "status": s["status"], "present": pres, "total": len(ROSTER),
-            "alerts": len(cmd("LRANGE", f"ps:alerts:{s['id']}", 0, -1) or []) if s["status"] != "SCHEDULED" else 0,
-            "start_time": s["start_time"], "end_time": s["end_time"],
-            "rotation_seconds": s["rotation_seconds"], "window_seconds": s["window_seconds"]}
-
-
-# ---------------- auth: signed stateless tokens ----------------
-def b64(b):
-    return base64.urlsafe_b64encode(b).decode().rstrip("=")
-
-
-def make_token(login):
-    msg = f"{login}.{int(time.time()) + 3 * 86400}"
-    return f"{msg}.{b64(hmac.new(SECRET, msg.encode(), hashlib.sha256).digest()[:16])}"
-
-
-def user_from(auth):
-    tok = (auth or "").removeprefix("Bearer ").strip()
-    try:
-        msg, sig = tok.rsplit(".", 1)
-        login, exp = msg.split(".")
-        ok = hmac.compare_digest(sig, b64(hmac.new(SECRET, msg.encode(), hashlib.sha256).digest()[:16]))
-        if ok and int(exp) > time.time() and login in USERS:
-            return login
-    except ValueError:
-        pass
-    raise ApiError("UNAUTHORIZED", "Please log in again", 401)
-
-
-# ---------------- QR ----------------
-def step(s):
-    return int((time.time() - s["opened_at"]) // s["rotation_seconds"])
-
-
-def qr_for(s, w):
-    mac = b64(hmac.new(SECRET, f"{s['id']}.{w}".encode(), hashlib.sha256).digest()[:9])
-    return f"A1.{s['id']}.{w}.{mac}"
-
-
-def check_qr(s, token):
-    p = token.split(".")
-    if len(p) != 4 or p[0] != "A1" or not p[2].isdigit():
-        raise ApiError("QR_INVALID", "This is not a PresentSir QR")
-    w = int(p[2])
-    if not hmac.compare_digest(qr_for(s, w), token):
-        raise ApiError("QR_INVALID", "QR code is not valid for this session")
-    if w not in (step(s), step(s) - 1):
-        raise ApiError("QR_EXPIRED", "QR expired, scan the latest one")
-
-
-# ---------------- models ----------------
 class LoginReq(BaseModel):
     login_id: str
     password: str
@@ -261,10 +67,6 @@ class SessionReq(BaseModel):
     topic: str
     date: str
     plan_id: int | None = None
-    start_time: str = "10:00"
-    duration_min: int = 60
-    rotation_seconds: int = 10
-    window_seconds: int = 120
 
 
 class RecordReq(BaseModel):
@@ -278,54 +80,138 @@ class PlanReq(BaseModel):
     planned_date: str
 
 
-# ---------------- student / device (Android app) ----------------
+def hms() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def course(cid):
+    return next(c for c in COURSES if c["id"] == cid)
+
+
+def sess(sid):
+    s = SESSIONS.get(sid)
+    if not s:
+        raise ApiError("NOT_FOUND", "Session not found", 404)
+    return s
+
+
+def open_session():
+    return next((s for s in SESSIONS.values() if s["status"] == "OPEN"), None)
+
+
+def new_session(cid, topic, date, plan_id=None, status="SCHEDULED"):
+    NID["s"] += 1
+    s = {"id": NID["s"], "course_id": cid, "topic": topic, "date": date, "plan_id": plan_id,
+         "status": status, "scans": [], "alerts": [], "records": {}, "log": []}
+    SESSIONS[s["id"]] = s
+    return s
+
+
+def summary(s):
+    pres = (sum(r["status"] == "PRESENT" for r in s["records"].values())
+            if s["records"] else len(s["scans"]))
+    c = course(s["course_id"])
+    return {"id": s["id"], "course_id": c["id"], "course": c["name"], "code": c["code"], "date": s["date"],
+            "topic": s["topic"], "status": s["status"], "present": pres, "total": len(ROSTER),
+            "alerts": len(s["alerts"])}
+
+
+def seed():
+    rnd = random.Random(7)
+    topics = ["Introduction", "Activities and Intents", "Jetpack Compose basics", "Navigation", "Networking"]
+    for cid in (1, 2, 3):
+        for i, t in enumerate(topics):
+            s = new_session(cid, t, f"2026-09-{8 + i * 3:02d}", status="SUBMITTED")
+            for u in ROSTER:
+                p = rnd.random() < (0.55 if u["uid"] in ("A07", "A22") else 0.88)
+                s["records"][u["uid"]] = {"status": "PRESENT" if p else "ABSENT",
+                                          "source": "SCAN" if p else "SYSTEM", "reason": "", "at": "10:05:00"}
+    for c in COURSES:
+        for n, t in enumerate(["Unit 1 overview", "Unit 2 concepts", "Case study", "Revision"], 1):
+            NID["p"] += 1
+            PLAN.append({"id": NID["p"], "course_id": c["id"], "no": n, "topic": t,
+                         "planned_date": f"2026-10-{n * 4:02d}", "status": "DONE" if n == 1 else "PLANNED"})
+
+
+seed()
+
+
+def user_from(auth):
+    login = TOKENS.get((auth or "").removeprefix("Bearer ").strip())
+    if not login:
+        raise ApiError("UNAUTHORIZED", "Please log in again", 401)
+    return login
+
+
+def window():
+    return int(time.time() // ROTATE)
+
+
+def qr_for(s, w):
+    mac = base64.urlsafe_b64encode(hmac.new(SECRET, f"{s['id']}.{w}".encode(), hashlib.sha256).digest()[:9]).decode()
+    return f"A1.{s['id']}.{w}.{mac}"
+
+
+def check_qr(s, token):
+    p = token.split(".")
+    if len(p) != 4 or p[0] != "A1" or not p[2].isdigit():
+        raise ApiError("QR_INVALID", "This is not a PresentSir QR")
+    w = int(p[2])
+    if not hmac.compare_digest(qr_for(s, w), token):
+        raise ApiError("QR_INVALID", "QR code is not valid for this session")
+    if w not in (window(), window() - 1):
+        raise ApiError("QR_EXPIRED", "QR expired, scan the latest one")
+
+
+# ---------------- student / device (used by the Android app) ----------------
 @app.post("/api/login")
 def login(req: LoginReq):
     lid = req.login_id.strip().lower()
     u = USERS.get(lid)
     if not u or u["password"] != req.password:
         raise ApiError("INVALID_CREDENTIALS", "Wrong ID or password", 401)
-    d = get_device(lid)
+    tok = secrets.token_urlsafe(24)
+    TOKENS[tok] = lid
+    d = DEVICES.get(lid)
     st = "NONE" if not d else ("ACTIVE_THIS_DEVICE" if d["android_id"] == req.android_id else "BOUND_TO_OTHER_DEVICE")
-    return {"access_token": make_token(lid), "name": u["name"], "uid": u["uid"], "device_status": st}
+    return {"access_token": tok, "name": u["name"], "uid": u["uid"], "device_status": st}
 
 
 @app.post("/api/device/register")
 def register(req: RegisterReq, authorization: str | None = Header(None)):
     lid = user_from(authorization)
-    d = get_device(lid)
+    d = DEVICES.get(lid)
     if d and d["android_id"] != req.android_id:
         raise ApiError("DEVICE_ALREADY_BOUND", "This account is bound to another device", 409)
     try:
         serialization.load_der_public_key(base64.b64decode(req.public_key))
     except Exception:
         raise ApiError("VALIDATION_ERROR", "Invalid public key")
-    cmd("HSET", "ps:devices", lid, json.dumps({"android_id": req.android_id, "public_key": req.public_key}))
+    DEVICES[lid] = {"android_id": req.android_id, "public_key": req.public_key}
+    DB.write_text(json.dumps(DEVICES))
     return {"status": "ACTIVE"}
 
 
 @app.post("/api/attendance/submit")
 def submit(req: SubmitReq, authorization: str | None = Header(None)):
     lid = user_from(authorization)
-    s = open_session(meta())
+    s = open_session()
     if not s:
         raise ApiError("SESSION_NOT_OPEN", "Attendance session is not open")
-    if time.time() > s["opened_at"] + s["window_seconds"]:
-        raise ApiError("WINDOW_CLOSED", "The attendance window has ended")
     if req.session_id != s["id"]:
         raise ApiError("QR_INVALID", "QR belongs to a different session")
     check_qr(s, req.qr_token)
-    if not cmd("SADD", f"ps:nonce:{s['id']}", req.client_nonce):
+    if req.client_nonce in NONCES:
         raise ApiError("REPLAY", "Request already used")
-    d = get_device(lid)
+    NONCES.add(req.client_nonce)
+    d = DEVICES.get(lid)
     if not d:
         raise ApiError("DEVICE_NOT_REGISTERED", "Register this device first")
     u = USERS[lid]
 
     def alert(kind):
-        cmd("LPUSH", f"ps:alerts:{s['id']}", json.dumps(
-            {"time": hms(), "name": u["name"], "uid": u["uid"], "kind": kind,
-             "attempted_device": req.android_id, "registered_device": d["android_id"]}))
+        s["alerts"].insert(0, {"time": hms(), "name": u["name"], "uid": u["uid"], "kind": kind,
+                               "attempted_device": req.android_id, "registered_device": d["android_id"]})
 
     if req.android_id != d["android_id"]:
         alert("DEVICE_MISMATCH")
@@ -337,24 +223,25 @@ def submit(req: SubmitReq, authorization: str | None = Header(None)):
     except (InvalidSignature, ValueError):
         alert("SIGNATURE_INVALID")
         raise ApiError("SIGNATURE_INVALID", "Device signature check failed", 403)
-    cmd("HSETNX", f"ps:scans:{s['id']}", u["uid"],
-        json.dumps({"name": u["name"], "uid": u["uid"], "time": hms(), "device": req.android_id}))
+    if not any(x["uid"] == u["uid"] for x in s["scans"]):
+        s["scans"].append({"name": u["name"], "uid": u["uid"], "time": hms(), "device": req.android_id})
     return {"status": "MARKED", "message": "Attendance marked"}
 
 
 @app.get("/api/student/attendance")
 def student_attendance(authorization: str | None = Header(None)):
-    """Open sessions count as present once the student has scanned; others use the official record."""
+    """Per-course attendance of the logged-in student.
+    Demo rule: an OPEN session counts as present as soon as the student has scanned;
+    closed/saved/submitted sessions use the official record."""
     uid = USERS[user_from(authorization)]["uid"]
-    M = meta()
     out = []
     for c in COURSES:
         present = total = 0
-        for s in M["sessions"].values():
+        for s in SESSIONS.values():
             if s["course_id"] != c["id"]:
                 continue
             if s["status"] == "OPEN":
-                if cmd("HEXISTS", f"ps:scans:{s['id']}", uid):
+                if any(x["uid"] == uid for x in s["scans"]):
                     present += 1
                     total += 1
             elif s["records"]:
@@ -363,7 +250,8 @@ def student_attendance(authorization: str | None = Header(None)):
                     continue
                 total += 1
                 present += st == "PRESENT"
-        out.append({"name": c["name"], "code": c["code"], "faculty": c["faculty"], "present": present, "total": total})
+        out.append({"name": c["name"], "code": c["code"], "faculty": c["faculty"],
+                    "present": present, "total": total})
     old = ["First Year Semester I", "First Year Semester II",
            "B. Tech. Second Year Semester III", "B. Tech. Second Year Semester IV"]
     return {"semesters": [{"name": n, "courses": []} for n in old]
@@ -378,78 +266,54 @@ def courses():
 
 @app.get("/api/sessions")
 def list_sessions():
-    M = meta()
-    ss = sorted(M["sessions"].values(), key=lambda s: (s["date"], s["start_time"], s["id"]), reverse=True)
-    return [summary(s) for s in ss]
+    return [summary(s) for s in sorted(SESSIONS.values(), key=lambda s: -s["id"])]
 
 
 @app.post("/api/sessions")
 def create(req: SessionReq):
     if not req.topic.strip():
         raise ApiError("VALIDATION_ERROR", "Topic is required")
-    if not (5 <= req.rotation_seconds <= 120) or not (30 <= req.window_seconds <= 3600) \
-            or not (15 <= req.duration_min <= 240):
-        raise ApiError("VALIDATION_ERROR", "Check rotation (5-120 s), QR time (30 s-60 min) and slot length")
-    try:
-        a = to_min(req.start_time)
-    except ValueError:
-        raise ApiError("VALIDATION_ERROR", "Start time must be HH:MM")
-    b = a + req.duration_min
-    if b > 24 * 60:
-        raise ApiError("VALIDATION_ERROR", "Slot must end before midnight")
-    M = meta()
-    for o in M["sessions"].values():
-        if o["date"] == req.date and o["status"] != "CANCELLED" and a < to_min(o["end_time"]) and to_min(o["start_time"]) < b:
-            raise ApiError("SLOT_OVERLAP", f"Slot overlaps session {o['id']} ({o['start_time']}-{o['end_time']})")
-    s = new_session(M, req.course_id, req.topic.strip(), req.date, req.plan_id, start=req.start_time,
-                    end=to_hhmm(b), rot=req.rotation_seconds, win=req.window_seconds)
-    save(M)
-    return summary(s)
+    return summary(new_session(req.course_id, req.topic.strip(), req.date, req.plan_id))
 
 
 @app.get("/api/sessions/{sid}")
 def detail(sid: int):
-    s = sess(meta(), sid)
+    s = sess(sid)
     rows = [{**u, **s["records"].get(u["uid"], {"status": None, "source": None, "reason": ""})} for u in ROSTER]
     return {**summary(s), "records": [{"uid": r["uid"], "name": r["name"], "status": r["status"],
                                        "source": r["source"], "reason": r["reason"]} for r in rows],
-            "alerts": get_alerts(sid), "log": s["log"]}
+            "alerts": s["alerts"], "log": s["log"]}
 
 
 @app.post("/api/sessions/{sid}/start")
 def start(sid: int):
-    M = meta()
-    s = sess(M, sid)
+    s = sess(sid)
     if s["status"] != "SCHEDULED":
         raise ApiError("INVALID_STATE", f"Cannot start a session that is {s['status']}")
-    if open_session(M):
+    if open_session():
         raise ApiError("INVALID_STATE", "Another session is already open")
     s["status"] = "OPEN"
-    s["opened_at"] = time.time()
-    save(M)
+    NONCES.clear()
     return summary(s)
 
 
 @app.post("/api/sessions/{sid}/close")
 def close(sid: int):
-    M = meta()
-    s = sess(M, sid)
+    s = sess(sid)
     if s["status"] != "OPEN":
         raise ApiError("INVALID_STATE", "Only an open session can be closed")
-    scanned = {x["uid"]: x["time"] for x in get_scans(sid)}
+    scanned = {x["uid"]: x["time"] for x in s["scans"]}
     for u in ROSTER:
         p = u["uid"] in scanned
         s["records"][u["uid"]] = {"status": "PRESENT" if p else "ABSENT", "source": "SCAN" if p else "SYSTEM",
                                   "reason": "" if p else "No attendance submission", "at": scanned.get(u["uid"], "")}
     s["status"] = "CLOSED"
-    save(M)
     return summary(s)
 
 
 @app.put("/api/sessions/{sid}/records/{uid}")
 def edit(sid: int, uid: str, req: RecordReq):
-    M = meta()
-    s = sess(M, sid)
+    s = sess(sid)
     if s["status"] not in ("CLOSED", "SAVED", "SUBMITTED"):
         raise ApiError("INVALID_STATE", "Edits are allowed only after the session is closed")
     if req.status not in ("PRESENT", "ABSENT", "EXCUSED") or len(req.reason.strip()) < 5:
@@ -459,26 +323,23 @@ def edit(sid: int, uid: str, req: RecordReq):
         raise ApiError("NOT_FOUND", "Student not found", 404)
     s["log"].insert(0, {"time": hms(), "uid": uid, "old": r["status"], "new": req.status, "reason": req.reason.strip()})
     r.update(status=req.status, source="MANUAL", reason=req.reason.strip())
-    save(M)
     return {"ok": True}
 
 
 def move(sid, frm, to):
-    M = meta()
-    s = sess(M, sid)
+    s = sess(sid)
     if s["status"] != frm:
         raise ApiError("INVALID_STATE", f"Session must be {frm}")
     s["status"] = to
     if to == "SUBMITTED" and s["plan_id"]:
-        for p in M["plan"]:
+        for p in PLAN:
             if p["id"] == s["plan_id"]:
                 p["status"] = "DONE"
-    save(M)
     return summary(s)
 
 
 @app.post("/api/sessions/{sid}/save")
-def save_attendance(sid: int):
+def save(sid: int):
     return move(sid, "CLOSED", "SAVED")
 
 
@@ -489,27 +350,17 @@ def submit_final(sid: int):
 
 @app.get("/api/live")
 def live():
-    s = open_session(meta())
+    s = open_session()
     if not s:
         return {"session": None}
-    left = max(0, round(s["opened_at"] + s["window_seconds"] - time.time()))
-    svg = None
-    if left > 0:
-        svg = segno.make(qr_for(s, step(s)), error="m").svg_inline(scale=8, border=2, dark="#1d3b6f", light="#ffffff")
-    rot = s["rotation_seconds"]
-    scans = get_scans(s["id"])
-    scanned = {x["uid"]: x for x in scans}
-    devs = hgetall("ps:devices")
-    roster = [{"uid": u["uid"], "name": u["name"], "device": LOGIN_BY_UID[u["uid"]] in devs,
-               "present": u["uid"] in scanned, "time": scanned.get(u["uid"], {}).get("time", "")} for u in ROSTER]
-    return {"session": summary(s), "qr_svg": svg, "expires_in": round(rot - ((time.time() - s["opened_at"]) % rot), 1),
-            "remaining": left, "roster": roster, "scans": scans, "alerts": get_alerts(s["id"])}
+    svg = segno.make(qr_for(s, window()), error="m").svg_inline(scale=8, border=2, dark="#1d3b6f", light="#ffffff")
+    return {"session": summary(s), "qr_svg": svg, "expires_in": round(ROTATE - (time.time() % ROTATE), 1),
+            "scans": s["scans"], "alerts": s["alerts"]}
 
 
 @app.get("/api/analytics/{cid}")
 def analytics(cid: int):
-    M = meta()
-    subs = sorted([s for s in M["sessions"].values() if s["course_id"] == cid and s["status"] == "SUBMITTED"],
+    subs = sorted([s for s in SESSIONS.values() if s["course_id"] == cid and s["status"] == "SUBMITTED"],
                   key=lambda s: s["id"])
     rows = []
     for u in ROSTER:
@@ -518,55 +369,43 @@ def analytics(cid: int):
         p = recs.count("PRESENT")
         rows.append({"uid": u["uid"], "name": u["name"], "present": p, "conducted": t,
                      "pct": round(p * 100 / t, 1) if t else None})
-    per = [{"id": s["id"], "date": s["date"], "topic": s["topic"],
-            "present": sum(r["status"] == "PRESENT" for r in s["records"].values()), "total": len(ROSTER)} for s in subs]
+    per = [{"id": s["id"], "date": s["date"], "topic": s["topic"], "present": summary(s)["present"],
+            "total": len(ROSTER)} for s in subs]
     return {"conducted": len(subs), "students": rows, "sessions": per}
 
 
 @app.get("/api/plan")
 def plan():
-    return meta()["plan"]
+    return PLAN
 
 
 @app.post("/api/plan")
 def plan_add(req: PlanReq):
-    M = meta()
-    M["nid"]["p"] += 1
-    n = sum(p["course_id"] == req.course_id for p in M["plan"]) + 1
-    M["plan"].append({"id": M["nid"]["p"], "course_id": req.course_id, "no": n, "topic": req.topic.strip(),
-                      "planned_date": req.planned_date, "status": "PLANNED"})
-    save(M)
+    NID["p"] += 1
+    n = sum(p["course_id"] == req.course_id for p in PLAN) + 1
+    PLAN.append({"id": NID["p"], "course_id": req.course_id, "no": n, "topic": req.topic.strip(),
+                 "planned_date": req.planned_date, "status": "PLANNED"})
     return {"ok": True}
 
 
 @app.post("/api/plan/{pid}/toggle")
 def plan_toggle(pid: int):
-    M = meta()
-    for p in M["plan"]:
+    for p in PLAN:
         if p["id"] == pid:
             p["status"] = "PLANNED" if p["status"] == "DONE" else "DONE"
-    save(M)
     return {"ok": True}
 
 
 @app.delete("/api/plan/{pid}")
 def plan_del(pid: int):
-    M = meta()
-    M["plan"] = [p for p in M["plan"] if p["id"] != pid]
-    save(M)
+    PLAN[:] = [p for p in PLAN if p["id"] != pid]
     return {"ok": True}
 
 
 @app.post("/api/admin/reset-devices")
 def reset_devices():
-    cmd("DEL", "ps:devices")
-    return {"ok": True}
-
-
-@app.post("/api/admin/reset-all")
-def reset_all():
-    """Wipes sessions/plan back to the seed data (devices stay registered)."""
-    save(seed())
+    DEVICES.clear()
+    DB.write_text("{}")
     return {"ok": True}
 
 
