@@ -22,6 +22,7 @@ BASE = Path(__file__).parent
 DB_PATH = os.environ.get("PRESENTSIR_DB") or str(BASE / "presentsir.db")
 SECRET = (os.environ.get("APP_SECRET") or "presentsir-demo-secret").encode()  # set APP_SECRET for real use
 IST = timezone(timedelta(hours=5, minutes=30))
+ON_VERCEL = bool(os.environ.get("VERCEL"))
 
 # Student table (login id, name, roll no). Password for everyone: 1234
 NAMES = [("ayush", "Ayush Mane", "A45"), ("ashish", "Ashish Warang", "A47"),
@@ -88,7 +89,7 @@ class SqliteStore:
         raise ValueError(op)
 
 
-DB = SqliteStore(DB_PATH)
+DB = None if ON_VERCEL else SqliteStore(DB_PATH)  # Vercel has no writable disk: do not crash, explain
 
 
 class ApiError(Exception):
@@ -102,6 +103,9 @@ async def _err(_: Request, e: ApiError):
 
 
 def cmd(*a):
+    if DB is None:
+        raise ApiError("NOT_FOR_VERCEL", "This version keeps data in a local file, so it cannot run on Vercel. "
+                       "Run it on your PC: uvicorn main:app --host 0.0.0.0 --port 8000", 503)
     try:
         return DB.cmd(*a)
     except sqlite3.Error:
