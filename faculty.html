@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Faculty Portal · PresentSir Attendance System</title>
+<style>
+:root{--navy:#1d3b6f;--navy2:#142a50;--line:#b9c3d3;--head:#e4eaf3;--text:#222;--mut:#555;--red:#a31515;--grn:#176b2c;--amb:#8a5a00}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 Arial,Helvetica,sans-serif;color:var(--text);background:#f2f4f7}
+.util{background:#e9ecf1;border-bottom:1px solid var(--line);font-size:12px;padding:4px 24px;display:flex;justify-content:space-between;color:var(--mut)}
+.banner{background:var(--navy);color:#fff;padding:14px 24px;border-bottom:4px solid #e0a526}
+.banner h1{margin:0;font:700 22px Georgia,"Times New Roman",serif}
+.banner p{margin:2px 0 0;font-size:13px;color:#cfd8e8}
+nav{background:var(--navy2);display:flex;flex-wrap:wrap;padding:0 24px}
+nav a{color:#fff;text-decoration:none;padding:10px 18px;font-size:14px;border-right:1px solid #2c4a80;cursor:pointer}
+nav a:hover,nav a.on{background:#e0a526;color:#111}
+main{max-width:1100px;margin:18px auto;padding:0 16px}
+.view{background:#fff;border:1px solid var(--line);padding:18px 22px;margin-bottom:18px}
+h2{font:700 18px Georgia,serif;color:var(--navy);margin:0 0 12px;padding-bottom:6px;border-bottom:2px solid var(--navy)}
+h3{font-size:15px;margin:18px 0 6px;color:var(--navy)}
+table{width:100%;border-collapse:collapse;margin:6px 0 4px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:middle}
+th{background:var(--head);font-weight:700;font-size:13px}
+tbody tr:nth-child(even){background:#f8f9fb}
+.form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;background:#f6f8fb;border:1px solid var(--line);padding:12px;margin-bottom:12px}
+label{display:flex;flex-direction:column;font-size:12px;font-weight:700;color:var(--mut);gap:3px}
+input,select{font:inherit;padding:5px 7px;border:1px solid #8c98ab;background:#fff;min-width:150px}
+button{font:inherit;padding:6px 14px;border:1px solid var(--navy);background:var(--navy);color:#fff;cursor:pointer}
+button:hover{background:var(--navy2)}
+button.alt{background:#fff;color:var(--navy)}
+button.danger{background:var(--red);border-color:var(--red)}
+button.sm{padding:3px 9px;font-size:13px}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #e0a526;outline-offset:1px}
+.st{font-weight:700;font-size:12px}
+.OPEN{color:var(--grn)}.SCHEDULED{color:var(--mut)}.CLOSED,.SAVED{color:var(--amb)}.SUBMITTED{color:var(--navy)}
+.low{color:var(--red);font-weight:700}
+.grid{display:grid;grid-template-columns:300px 1fr;gap:22px}
+.qr{border:1px solid var(--line);padding:8px;background:#fff}.qr svg{width:100%;height:auto;display:block}
+.bar{height:6px;background:#dde3ec;margin-top:6px}.bar i{display:block;height:100%;background:var(--navy);width:100%;transition:width .3s linear}
+.stat{display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+.stat div{border:1px solid var(--line);padding:8px 16px;background:#f6f8fb}.stat b{display:block;font-size:22px;color:var(--navy)}
+.warn{border:1px solid var(--red);border-left:6px solid var(--red);background:#fdf1f1;padding:8px 12px;margin:6px 0}
+.note{color:var(--mut);font-size:13px}
+.meter{display:inline-block;width:110px;height:9px;background:#dde3ec;vertical-align:middle;margin-right:6px}.meter i{display:block;height:100%;background:var(--grn)}.meter i.l{background:var(--red)}
+footer{text-align:center;color:var(--mut);font-size:12px;padding:10px 0 24px}
+footer a{color:var(--navy);cursor:pointer}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.view{padding:12px}}
+</style>
+</head>
+<body>
+<div class="util"><span>Academic Year 2026-27 · Semester V</span><span>Logged in: Faculty (Demo)</span></div>
+<div class="banner"><h1>College of Engineering · Faculty Portal</h1><p>PresentSir Smart Attendance System</p></div>
+<nav>
+  <a data-v="sessions">Attendance Sessions</a><a data-v="live">Live Session</a>
+  <a data-v="analytics">Analytics</a><a data-v="plan">Session Plan</a>
+</nav>
+<main>
+
+<section class="view" id="v-sessions">
+  <h2>Attendance Sessions</h2>
+  <div class="form">
+    <label>Course<select id="s-course"></select></label>
+    <label>Date<input type="date" id="s-date"></label>
+    <label>From session plan<select id="s-plan"><option value="">-- none --</option></select></label>
+    <label>Topic<input id="s-topic" style="min-width:230px"></label>
+    <button id="s-add">Create Session</button>
+  </div>
+  <table><thead><tr><th>ID</th><th>Date</th><th>Course</th><th>Topic</th><th>Status</th><th>Present</th><th>Action</th></tr></thead>
+  <tbody id="s-rows"></tbody></table>
+</section>
+
+<section class="view" id="v-live" hidden>
+  <h2>Live Attendance Session</h2>
+  <div id="live-none" class="note">No session is open. Start a scheduled session from the Attendance Sessions page.</div>
+  <div id="live-on" hidden>
+    <p id="live-info"></p>
+    <div class="grid">
+      <div><div class="qr" id="qr"></div><div class="bar"><i id="bar"></i></div>
+        <p class="note">QR changes every 10 seconds.</p></div>
+      <div>
+        <div class="stat"><div><b id="l-n">0</b>Scanned</div><div><b id="l-a">0</b>Alerts</div></div>
+        <button class="danger" id="l-close">Close Session</button>
+        <h3>Proxy / device alerts</h3><div id="l-alerts"></div>
+        <h3>Attendance received</h3>
+        <table><thead><tr><th>Roll</th><th>Name</th><th>Time</th></tr></thead><tbody id="l-rows"></tbody></table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-detail" hidden>
+  <h2 id="d-title">Session</h2>
+  <p id="d-info"></p>
+  <div id="d-btns" style="margin-bottom:8px"></div>
+  <table><thead><tr><th>Roll</th><th>Name</th><th>Status</th><th>Source</th><th>Remarks</th></tr></thead><tbody id="d-rows"></tbody></table>
+  <h3>Proxy / device alerts</h3><div id="d-alerts"></div>
+  <h3>Audit log (manual changes)</h3>
+  <table><thead><tr><th>Time</th><th>Roll</th><th>Change</th><th>Reason</th></tr></thead><tbody id="d-log"></tbody></table>
+  <p><button class="alt" onclick="show('sessions')">&laquo; Back to sessions</button></p>
+</section>
+
+<section class="view" id="v-analytics" hidden>
+  <h2>Attendance Analytics</h2>
+  <div class="form"><label>Course<select id="a-course"></select></label></div>
+  <div class="stat" id="a-stat"></div>
+  <h3>Student-wise attendance (submitted sessions only)</h3>
+  <table><thead><tr><th>Roll</th><th>Name</th><th>Present</th><th>Conducted</th><th>Percentage</th><th>Remark</th></tr></thead><tbody id="a-rows"></tbody></table>
+  <p class="note">Minimum required attendance: 75%.</p>
+  <h3>Session-wise attendance</h3>
+  <table><thead><tr><th>Session</th><th>Date</th><th>Topic</th><th>Present</th><th>%</th></tr></thead><tbody id="a-sess"></tbody></table>
+</section>
+
+<section class="view" id="v-plan" hidden>
+  <h2>Session Plan</h2>
+  <div class="form">
+    <label>Course<select id="p-course"></select></label>
+    <label>Planned date<input type="date" id="p-date"></label>
+    <label>Topic<input id="p-topic" style="min-width:260px"></label>
+    <button id="p-add">Add to Plan</button>
+  </div>
+  <table><thead><tr><th>Lecture</th><th>Course</th><th>Planned date</th><th>Topic</th><th>Status</th><th>Action</th></tr></thead><tbody id="p-rows"></tbody></table>
+</section>
+</main>
+<footer>PresentSir Attendance System · Demo build · <a id="reset">Reset registered devices</a></footer>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api=async(m,p,b)=>{const r=await fetch('/api'+p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
+  const j=await r.json();if(!r.ok)throw new Error(j.message||'Request failed');return j};
+const run=async f=>{try{await f()}catch(e){alert(e.message)}};
+let C=[],cur='sessions',did=null,PL=[];
+const cname=id=>(C.find(c=>c.id==id)||{}).name||'';
+const opts=()=>C.map(c=>`<option value="${c.id}">${esc(c.name)} [${esc(c.code)}]</option>`).join('');
+
+function show(v,id){cur=v;if(id)did=id;
+  document.querySelectorAll('.view').forEach(e=>e.hidden=e.id!=='v-'+v);
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.v===v||(v==='detail'&&a.dataset.v==='sessions')));
+  load()}
+document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>show(a.dataset.v));
+const load=()=>run({sessions:loadSessions,live:loadLive,detail:loadDetail,analytics:loadAnalytics,plan:loadPlan}[cur]);
+
+async function loadSessions(){
+  const rows=await api('GET','/sessions');
+  $('s-rows').innerHTML=rows.map(s=>`<tr><td>${s.id}</td><td>${esc(s.date)}</td><td>${esc(s.course)}</td><td>${esc(s.topic)}</td>
+   <td class="st ${s.status}">${s.status}</td><td>${s.status==='SCHEDULED'?'-':s.present+' / '+s.total}</td>
+   <td>${s.status==='SCHEDULED'?`<button class="sm" onclick="startS(${s.id})">Start</button>`:
+        s.status==='OPEN'?`<button class="sm" onclick="show('live')">Open live</button>`:
+        `<button class="sm alt" onclick="show('detail',${s.id})">View</button>`}</td></tr>`).join('');
+  fillPlanSelect();
+}
+async function fillPlanSelect(){
+  PL=await api('GET','/plan');const c=$('s-course').value;
+  $('s-plan').innerHTML='<option value="">-- none --</option>'+PL.filter(p=>p.course_id==c&&p.status==='PLANNED')
+    .map(p=>`<option value="${p.id}">L${p.no}: ${esc(p.topic)}</option>`).join('');
+}
+$('s-course').onchange=fillPlanSelect;
+$('s-plan').onchange=()=>{const p=PL.find(x=>x.id==$('s-plan').value);if(p){$('s-topic').value=p.topic;$('s-date').value=p.planned_date}};
+$('s-add').onclick=()=>run(async()=>{
+  await api('POST','/sessions',{course_id:+$('s-course').value,topic:$('s-topic').value,date:$('s-date').value,plan_id:$('s-plan').value?+$('s-plan').value:null});
+  $('s-topic').value='';loadSessions()});
+const startS=id=>run(async()=>{await api('POST',`/sessions/${id}/start`);show('live')});
+
+async function loadLive(){
+  const d=await api('GET','/live'),on=!!d.session;
+  $('live-none').hidden=on;$('live-on').hidden=!on;if(!on)return;
+  $('live-info').innerHTML=`<b>${esc(d.session.course)}</b> · ${esc(d.session.topic)} · Session ${d.session.id}`;
+  $('qr').innerHTML=d.qr_svg;$('bar').style.width=d.expires_in*10+'%';
+  $('l-n').textContent=d.scans.length;$('l-a').textContent=d.alerts.length;
+  $('l-rows').innerHTML=d.scans.map(s=>`<tr><td>${esc(s.uid)}</td><td>${esc(s.name)}</td><td>${esc(s.time)}</td></tr>`).join('')||'<tr><td colspan="3">No attendance received yet.</td></tr>';
+  $('l-alerts').innerHTML=alerts(d.alerts);
+}
+const alerts=a=>a.length?a.map(x=>`<div class="warn"><b>Proxy attempt</b> for ${esc(x.name)} (${esc(x.uid)}) at ${esc(x.time)} &mdash; ${esc(x.kind)}<br>
+  Device used: <code>${esc(x.attempted_device)}</code> &nbsp; Registered device: <code>${esc(x.registered_device)}</code></div>`).join(''):'<p class="note">No suspicious attempts recorded.</p>';
+$('l-close').onclick=()=>run(async()=>{if(!confirm('Close this session? Students who have not scanned will be marked absent.'))return;
+  const s=await api('POST',`/sessions/${(await api('GET','/live')).session.id}/close`);show('detail',s.id)});
+
+async function loadDetail(){
+  const s=await api('GET','/sessions/'+did),ed=['CLOSED','SAVED','SUBMITTED'].includes(s.status);
+  $('d-title').textContent=`Session ${s.id} · ${s.course}`;
+  $('d-info').innerHTML=`Date: ${esc(s.date)} · Topic: ${esc(s.topic)} · Status: <span class="st ${s.status}">${s.status}</span> · Present: <b>${s.present} / ${s.total}</b>`;
+  $('d-btns').innerHTML=s.status==='CLOSED'?'<button onclick="mv(\'save\')">Save Attendance</button>':
+    s.status==='SAVED'?'<button onclick="mv(\'submit\')">Submit Final Attendance</button>':
+    s.status==='SUBMITTED'?'<span class="note">Submitted. Further edits are logged as post-submit changes.</span>':'';
+  $('d-rows').innerHTML=s.records.map(r=>`<tr><td>${esc(r.uid)}</td><td>${esc(r.name)}</td><td>${ed?
+    `<select onchange="edit('${r.uid}',this.value)">${['PRESENT','ABSENT','EXCUSED'].map(o=>`<option ${o===r.status?'selected':''}>${o}</option>`).join('')}</select>`:esc(r.status||'-')}</td>
+    <td>${esc(r.source||'-')}</td><td>${esc(r.reason)}</td></tr>`).join('');
+  $('d-alerts').innerHTML=alerts(s.alerts);
+  $('d-log').innerHTML=s.log.map(l=>`<tr><td>${esc(l.time)}</td><td>${esc(l.uid)}</td><td>${esc(l.old)} &rarr; ${esc(l.new)}</td><td>${esc(l.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No manual changes.</td></tr>';
+}
+const mv=a=>run(async()=>{if(a==='submit'&&!confirm('Submit final attendance for this session?'))return;await api('POST',`/sessions/${did}/${a}`);loadDetail()});
+const edit=(uid,status)=>run(async()=>{const r=prompt('Reason for manual change (minimum 5 characters):');
+  if(r===null){loadDetail();return}try{await api('PUT',`/sessions/${did}/records/${uid}`,{status,reason:r})}finally{loadDetail()}});
+
+async function loadAnalytics(){
+  const d=await api('GET','/analytics/'+$('a-course').value),low=d.students.filter(s=>s.pct!==null&&s.pct<75).length;
+  const avg=d.students.filter(s=>s.pct!==null);
+  $('a-stat').innerHTML=`<div><b>${d.conducted}</b>Sessions conducted</div><div><b>${avg.length?(avg.reduce((a,s)=>a+s.pct,0)/avg.length).toFixed(1)+'%':'-'}</b>Class average</div><div><b>${low}</b>Below 75%</div>`;
+  $('a-rows').innerHTML=d.students.map(s=>{const l=s.pct!==null&&s.pct<75;return `<tr><td>${esc(s.uid)}</td><td>${esc(s.name)}</td><td>${s.present}</td><td>${s.conducted}</td>
+   <td>${s.pct===null?'-':`<span class="meter"><i class="${l?'l':''}" style="width:${s.pct}%"></i></span>${s.pct}%`}</td><td class="${l?'low':''}">${l?'Shortage':s.pct===null?'':'Satisfactory'}</td></tr>`}).join('');
+  $('a-sess').innerHTML=d.sessions.map(s=>`<tr><td>${s.id}</td><td>${esc(s.date)}</td><td>${esc(s.topic)}</td><td>${s.present} / ${s.total}</td><td>${Math.round(s.present*100/s.total)}%</td></tr>`).join('')||'<tr><td colspan="5">No submitted sessions for this course.</td></tr>';
+}
+$('a-course').onchange=loadAnalytics;
+
+async function loadPlan(){
+  const p=await api('GET','/plan');
+  $('p-rows').innerHTML=p.map(x=>`<tr><td>L${x.no}</td><td>${esc(cname(x.course_id))}</td><td>${esc(x.planned_date)}</td><td>${esc(x.topic)}</td>
+   <td class="st ${x.status==='DONE'?'SUBMITTED':'SCHEDULED'}">${x.status}</td>
+   <td><button class="sm alt" onclick="pt(${x.id})">${x.status==='DONE'?'Mark planned':'Mark done'}</button> <button class="sm alt" onclick="pd(${x.id})">Delete</button></td></tr>`).join('');
+}
+const pt=id=>run(async()=>{await api('POST',`/plan/${id}/toggle`);loadPlan()});
+const pd=id=>run(async()=>{if(confirm('Delete this plan entry?')){await api('DELETE','/plan/'+id);loadPlan()}});
+$('p-add').onclick=()=>run(async()=>{await api('POST','/plan',{course_id:+$('p-course').value,topic:$('p-topic').value,planned_date:$('p-date').value});$('p-topic').value='';loadPlan()});
+$('reset').onclick=()=>run(async()=>{if(confirm('Unbind all registered student devices?'))await api('POST','/admin/reset-devices')});
+
+(async()=>{C=await api('GET','/courses');['s-course','a-course','p-course'].forEach(i=>$(i).innerHTML=opts());
+  $('s-date').value=$('p-date').value=new Date().toISOString().slice(0,10);
+  show('sessions');setInterval(()=>{if(cur==='live')load()},1000)})();
+</script>
+</body>
+</html>
