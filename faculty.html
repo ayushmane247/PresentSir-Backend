@@ -44,15 +44,10 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{ou
 .note{color:var(--mut);font-size:13px}
 .meter{display:inline-block;width:110px;height:9px;background:#dde3ec;vertical-align:middle;margin-right:6px}.meter i{display:block;height:100%;background:var(--grn)}.meter i.l{background:var(--red)}
 #qrwrap .fsinfo{display:none}
-#qrwrap:fullscreen,#qrwrap.fsfake{background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
-#qrwrap.fsfake{position:fixed;inset:0;z-index:9999;cursor:pointer}
+#qrwrap:fullscreen{background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
 #qrwrap:fullscreen .qr{width:min(76vh,90vw);border:0}
-#qrwrap.fsfake .qr{width:min(76vh,90vw);border:0}
 #qrwrap:fullscreen .bar{width:min(76vh,90vw)}
-#qrwrap.fsfake .bar{width:min(76vh,90vw)}
 #qrwrap:fullscreen .fsinfo{display:block;font:700 clamp(18px,3.4vh,34px) Georgia,serif;color:var(--navy);text-align:center}
-#qrwrap.fsfake .fsinfo{display:block;font:700 clamp(18px,3.4vh,34px) Georgia,serif;color:var(--navy);text-align:center}
-#err{background:#fdf1f1;border:1px solid var(--red);color:var(--red);padding:6px 24px;font-size:13px}
 .ok{color:var(--grn);font-weight:700}.wait{color:var(--mut)}
 footer{text-align:center;color:var(--mut);font-size:12px;padding:10px 0 24px}
 footer a{color:var(--navy);cursor:pointer}
@@ -62,7 +57,6 @@ footer a{color:var(--navy);cursor:pointer}
 <body>
 <div class="util"><span>Academic Year 2026-27 · Semester V</span><span>Logged in: Faculty (Demo)</span></div>
 <div class="banner"><h1>College of Engineering · Faculty Portal</h1><p>PresentSir Smart Attendance System</p></div>
-<div id="err" hidden></div>
 <nav>
   <a data-v="sessions">Attendance Sessions</a><a data-v="live">Live Session</a>
   <a data-v="analytics">Analytics</a><a data-v="plan">Session Plan</a>
@@ -198,13 +192,7 @@ async function loadLive(){
     <td class="${r.present?'ok':'wait'}">${r.present?'PRESENT':'Waiting'}</td><td>${esc(r.time)}</td></tr>`).join('');
   $('l-alerts').innerHTML=alerts(d.alerts);
 }
-const fsExit=()=>{$('qrwrap').classList.remove('fsfake');if(document.fullscreenElement)document.exitFullscreen().catch(()=>{})};
-$('fs').onclick=async()=>{const w=$('qrwrap');
-  if(document.fullscreenElement||w.classList.contains('fsfake')){fsExit();return}
-  try{if(w.requestFullscreen)await w.requestFullscreen();else w.classList.add('fsfake')}
-  catch(e){w.classList.add('fsfake')}};  // browsers without the Fullscreen API (e.g. iPhone) get a full-window view instead
-$('qrwrap').onclick=()=>{if($('qrwrap').classList.contains('fsfake'))fsExit()};
-document.addEventListener('keydown',e=>{if(e.key==='Escape')$('qrwrap').classList.remove('fsfake')});
+$('fs').onclick=()=>document.fullscreenElement?document.exitFullscreen():$('qrwrap').requestFullscreen();
 const alerts=a=>a.length?a.map(x=>`<div class="warn"><b>Proxy attempt</b> for ${esc(x.name)} (${esc(x.uid)}) at ${esc(x.time)} &mdash; ${esc(x.kind)}<br>
   Device used: <code>${esc(x.attempted_device)}</code> &nbsp; Registered device: <code>${esc(x.registered_device)}</code></div>`).join(''):'<p class="note">No suspicious attempts recorded.</p>';
 $('l-close').onclick=()=>run(async()=>{if(!confirm('Close this session? Students who have not scanned will be marked absent.'))return;
@@ -248,17 +236,10 @@ const pd=id=>run(async()=>{if(confirm('Delete this plan entry?')){await api('DEL
 $('p-add').onclick=()=>run(async()=>{await api('POST','/plan',{course_id:+$('p-course').value,topic:$('p-topic').value,planned_date:$('p-date').value});$('p-topic').value='';loadPlan()});
 $('reset').onclick=()=>run(async()=>{if(confirm('Unbind all registered student devices?'))await api('POST','/admin/reset-devices')});
 
-let busy=false,tick=0;
-async function poll(){  // background refresh: never alert(), never overlap, never leave fullscreen
-  if(busy)return;busy=true;tick++;
-  try{if(cur==='live')await loadLive();else if(cur==='sessions'&&tick%3===0)await renderSessions();$('err').hidden=true}
-  catch(e){$('err').textContent='Connection problem: '+e.message+' (retrying)';$('err').hidden=false}
-  finally{busy=false}}
 (async()=>{C=await api('GET','/courses');['s-course','a-course','p-course'].forEach(i=>$(i).innerHTML=opts());
-  const now=new Date(),ld=new Date(now-now.getTimezoneOffset()*60000).toISOString().slice(0,10);  // local date, not UTC
-  $('s-date').value=$('p-date').value=ld;
+  $('s-date').value=$('p-date').value=new Date().toISOString().slice(0,10);
   const nx=new Date();nx.setMinutes(0,0,0);nx.setHours(nx.getHours()+1);$('s-start').value=nx.toTimeString().slice(0,5);
-  show('sessions');setInterval(poll,1000)})();
+  show('sessions');setInterval(()=>{if(cur==='live')load();else if(cur==='sessions')run(renderSessions)},cur==='live'?1000:1000)})();
 </script>
 </body>
 </html>

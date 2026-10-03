@@ -1,12 +1,11 @@
-"""PresentSir backend (local, no external services).
+"""PresentSir demo backend (stateless).
 
-All data (sessions, scans, device bindings, plan) is stored in one SQLite file, presentsir.db,
-next to this script. It survives restarts. Login tokens are signed (HMAC), so they stay valid too.
-Run:  uvicorn main:app --host 0.0.0.0 --port 8000      (keep it to ONE process; do not use --workers)
-Not for Vercel/serverless: those have no permanent disk, so run it on your own PC or server.
+State lives in Upstash Redis when UPSTASH_REDIS_REST_URL / _TOKEN (or Vercel's KV_REST_API_URL / _TOKEN)
+are set; otherwise it falls back to in-memory storage (fine for a single laptop process).
+Login tokens are signed (HMAC), so any server instance can verify them.
+Run locally: uvicorn main:app --host 0.0.0.0 --port 8000
 """
-import base64, hashlib, hmac, json, os, random, secrets, sqlite3, threading, time
-from concurrent.futures import ThreadPoolExecutor
+import base64, hashlib, hmac, json, os, random, secrets, time, urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,10 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 BASE = Path(__file__).parent
-DB_PATH = os.environ.get("PRESENTSIR_DB") or str(BASE / "presentsir.db")
 SECRET = (os.environ.get("APP_SECRET") or "presentsir-demo-secret").encode()  # set APP_SECRET for real use
 IST = timezone(timedelta(hours=5, minutes=30))
-ON_VERCEL = bool(os.environ.get("VERCEL"))
+RURL = os.environ.get("UPSTASH_REDIS_REST_URL") or os.environ.get("KV_REST_API_URL")
+RTOK = os.environ.get("UPSTASH_REDIS_REST_TOKEN") or os.environ.get("KV_REST_API_TOKEN")
 
 # Student table (login id, name, roll no). Password for everyone: 1234
 NAMES = [("ayush", "Ayush Mane", "A45"), ("ashish", "Ashish Warang", "A47"),
@@ -40,56 +39,34 @@ COURSES = [{"id": 1, "name": "Android App Development", "code": "231CSEOECL302",
 app = FastAPI(title="PresentSir demo")
 
 
-# ---------------- storage (SQLite) ----------------
-class SqliteStore:
-    """Tiny key/hash/set/list store on SQLite. Every call is atomic (one lock, autocommit)."""
-
-    def __init__(self, path):
-        self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
-            CREATE TABLE IF NOT EXISTS h(k TEXT, f TEXT, v TEXT, PRIMARY KEY(k, f));
-            CREATE TABLE IF NOT EXISTS st(k TEXT, m TEXT, PRIMARY KEY(k, m));
-            CREATE TABLE IF NOT EXISTS ls(id INTEGER PRIMARY KEY AUTOINCREMENT, k TEXT, v TEXT);""")
+# ---------------- storage ----------------
+class MemStore:
+    def __init__(self):
+        self.d = {}
 
     def cmd(self, op, k, *r):
-        with self.lock:
-            q = self.db.execute
-            if op == "GET":
-                row = q("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
-                return row[0] if row else None
-            if op == "SET":
-                if "NX" in r:
-                    return "OK" if q("INSERT OR IGNORE INTO kv VALUES(?,?)", (k, str(r[0]))).rowcount else None
-                q("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, str(r[0])))
-                return "OK"
-            if op == "DEL":
-                return sum(q(f"DELETE FROM {t} WHERE k=?", (k,)).rowcount for t in ("kv", "h", "st", "ls"))
-            if op == "HSET":
-                q("INSERT OR REPLACE INTO h VALUES(?,?,?)", (k, r[0], str(r[1])))
-                return 1
-            if op == "HSETNX":
-                return q("INSERT OR IGNORE INTO h VALUES(?,?,?)", (k, r[0], str(r[1]))).rowcount
-            if op == "HGET":
-                row = q("SELECT v FROM h WHERE k=? AND f=?", (k, r[0])).fetchone()
-                return row[0] if row else None
-            if op == "HEXISTS":
-                return int(q("SELECT 1 FROM h WHERE k=? AND f=?", (k, r[0])).fetchone() is not None)
-            if op == "HGETALL":
-                return [x for row in q("SELECT f, v FROM h WHERE k=?", (k,)).fetchall() for x in row]
-            if op == "SADD":
-                return q("INSERT OR IGNORE INTO st VALUES(?,?)", (k, str(r[0]))).rowcount
-            if op == "LPUSH":
-                q("INSERT INTO ls(k, v) VALUES(?,?)", (k, str(r[0])))
-                return q("SELECT COUNT(*) FROM ls WHERE k=?", (k,)).fetchone()[0]
-            if op == "LRANGE":  # newest first; only used as "whole list"
-                return [row[0] for row in q("SELECT v FROM ls WHERE k=? ORDER BY id DESC", (k,)).fetchall()]
+        d = self.d
+        if op == "GET": return d.get(k)
+        if op == "SET":
+            if "NX" in r and k in d: return None
+            d[k] = r[0]; return "OK"
+        if op == "DEL": return int(d.pop(k, None) is not None)
+        if op == "HSET": d.setdefault(k, {})[r[0]] = r[1]; return 1
+        if op == "HSETNX":
+            h = d.setdefault(k, {})
+            if r[0] in h: return 0
+            h[r[0]] = r[1]; return 1
+        if op == "HGET": return d.get(k, {}).get(r[0])
+        if op == "HEXISTS": return int(r[0] in d.get(k, {}))
+        if op == "HGETALL": return [x for kv in d.get(k, {}).items() for x in kv]
+        if op == "SADD":
+            s = d.setdefault(k, set()); new = int(r[0] not in s); s.add(r[0]); return new
+        if op == "LPUSH": d.setdefault(k, []).insert(0, r[0]); return len(d[k])
+        if op == "LRANGE": return list(d.get(k, []))
         raise ValueError(op)
 
 
-DB = None if ON_VERCEL else SqliteStore(DB_PATH)  # Vercel has no writable disk: do not crash, explain
+MEM = MemStore()
 
 
 class ApiError(Exception):
@@ -103,13 +80,15 @@ async def _err(_: Request, e: ApiError):
 
 
 def cmd(*a):
-    if DB is None:
-        raise ApiError("NOT_FOR_VERCEL", "This version keeps data in a local file, so it cannot run on Vercel. "
-                       "Run it on your PC: uvicorn main:app --host 0.0.0.0 --port 8000", 503)
+    if not RURL:
+        return MEM.cmd(*a)
+    req = urllib.request.Request(RURL, data=json.dumps([str(x) for x in a]).encode(),
+                                 headers={"Authorization": "Bearer " + RTOK, "Content-Type": "application/json"})
     try:
-        return DB.cmd(*a)
-    except sqlite3.Error:
-        raise ApiError("STORE_ERROR", "Database error", 503)
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())["result"]
+    except Exception:
+        raise ApiError("STORE_ERROR", "Storage is unavailable", 503)
 
 
 def hgetall(k):
@@ -200,21 +179,15 @@ def open_session(M):
     return next((s for s in M["sessions"].values() if s["status"] == "OPEN"), None)
 
 
-def summary(s, scans=None, alerts_n=None):
+def summary(s):
     if s["records"]:
         pres = sum(r["status"] == "PRESENT" for r in s["records"].values())
-    elif s["status"] == "OPEN":
-        pres = len(scans if scans is not None else get_scans(s["id"]))
     else:
-        pres = 0
-    if s["status"] == "OPEN":
-        n_alerts = alerts_n if alerts_n is not None else len(cmd("LRANGE", f"ps:alerts:{s['id']}", 0, -1) or [])
-    else:
-        n_alerts = s.get("alert_count", 0)
+        pres = len(get_scans(s["id"])) if s["status"] == "OPEN" else 0
     c = course(s["course_id"])
     return {"id": s["id"], "course_id": c["id"], "course": c["name"], "code": c["code"], "date": s["date"],
             "topic": s["topic"], "status": s["status"], "present": pres, "total": len(ROSTER),
-            "alerts": n_alerts,
+            "alerts": len(cmd("LRANGE", f"ps:alerts:{s['id']}", 0, -1) or []) if s["status"] != "SCHEDULED" else 0,
             "start_time": s["start_time"], "end_time": s["end_time"],
             "rotation_seconds": s["rotation_seconds"], "window_seconds": s["window_seconds"]}
 
@@ -468,7 +441,6 @@ def close(sid: int):
         p = u["uid"] in scanned
         s["records"][u["uid"]] = {"status": "PRESENT" if p else "ABSENT", "source": "SCAN" if p else "SYSTEM",
                                   "reason": "" if p else "No attendance submission", "at": scanned.get(u["uid"], "")}
-    s["alert_count"] = len(get_alerts(sid))
     s["status"] = "CLOSED"
     save(M)
     return summary(s)
@@ -520,34 +492,18 @@ def live():
     s = open_session(meta())
     if not s:
         return {"session": None}
-    sid = s["id"]
-    with ThreadPoolExecutor(3) as ex:
-        f_scans, f_devs, f_alerts = ex.submit(get_scans, sid), ex.submit(hgetall, "ps:devices"), ex.submit(get_alerts, sid)
-        scans, devs, alerts = f_scans.result(), f_devs.result(), f_alerts.result()
     left = max(0, round(s["opened_at"] + s["window_seconds"] - time.time()))
     svg = None
     if left > 0:
         svg = segno.make(qr_for(s, step(s)), error="m").svg_inline(scale=8, border=2, dark="#1d3b6f", light="#ffffff")
     rot = s["rotation_seconds"]
+    scans = get_scans(s["id"])
     scanned = {x["uid"]: x for x in scans}
+    devs = hgetall("ps:devices")
     roster = [{"uid": u["uid"], "name": u["name"], "device": LOGIN_BY_UID[u["uid"]] in devs,
                "present": u["uid"] in scanned, "time": scanned.get(u["uid"], {}).get("time", "")} for u in ROSTER]
-    return {"session": summary(s, scans, len(alerts)), "qr_svg": svg,
-            "expires_in": round(rot - ((time.time() - s["opened_at"]) % rot), 1),
-            "remaining": left, "roster": roster, "scans": scans, "alerts": alerts}
-
-
-@app.get("/api/health")
-def health():
-    """Open /api/health to check the database works and see how much data it holds."""
-    out = {"store": "sqlite", "file": DB_PATH}
-    try:
-        out["sessions"] = len(meta()["sessions"])
-        out["devices_registered"] = len(hgetall("ps:devices"))
-        out["ok"] = True
-    except ApiError as e:
-        out.update(ok=False, error=e.message)
-    return out
+    return {"session": summary(s), "qr_svg": svg, "expires_in": round(rot - ((time.time() - s["opened_at"]) % rot), 1),
+            "remaining": left, "roster": roster, "scans": scans, "alerts": get_alerts(s["id"])}
 
 
 @app.get("/api/analytics/{cid}")
