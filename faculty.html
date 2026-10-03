@@ -49,7 +49,10 @@ footer a{color:var(--navy);cursor:pointer}
 </style>
 </head>
 <body>
-<div class="util"><span>Academic Year 2026-27 · Semester V</span><span>Logged in: Faculty (Demo)</span></div>
+<div class="util">
+  <span id="academic-info"></span>
+  <span>Logged in: Faculty (Demo)</span>
+</div>
 <div class="banner"><h1>College of Engineering · Faculty Portal</h1><p>PresentSir Smart Attendance System</p></div>
 <nav>
   <a data-v="sessions">Attendance Sessions</a><a data-v="live">Live Session</a>
@@ -215,8 +218,35 @@ $('p-add').onclick=()=>run(async()=>{await api('POST','/plan',{course_id:+$('p-c
 $('reset').onclick=()=>run(async()=>{if(confirm('Unbind all registered student devices?'))await api('POST','/admin/reset-devices')});
 
 (async()=>{C=await api('GET','/courses');['s-course','a-course','p-course'].forEach(i=>$(i).innerHTML=opts());
-  $('s-date').value=$('p-date').value=new Date().toISOString().slice(0,10);
+  const today = new Date();
+const localDate = [
+  today.getFullYear(),
+  String(today.getMonth() + 1).padStart(2, '0'),
+  String(today.getDate()).padStart(2, '0')
+].join('-');
+
+$('s-date').value = $('p-date').value = localDate;
+
   show('sessions');setInterval(()=>{if(cur==='live')load()},1000)})();
+
+  const now = new Date();
+
+const localDate = [
+  now.getFullYear(),
+  String(now.getMonth() + 1).padStart(2, '0'),
+  String(now.getDate()).padStart(2, '0')
+].join('-');
+
+$('s-date').value = localDate;
+$('p-date').value = localDate;
+
+$('academic-info').textContent =
+  `Academic Year 2026-27 · Semester V · ${now.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  })}`;
+
 </script>
 </body>
 </html>
