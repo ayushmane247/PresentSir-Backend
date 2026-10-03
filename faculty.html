@@ -43,12 +43,6 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{ou
 .warn{border:1px solid var(--red);border-left:6px solid var(--red);background:#fdf1f1;padding:8px 12px;margin:6px 0}
 .note{color:var(--mut);font-size:13px}
 .meter{display:inline-block;width:110px;height:9px;background:#dde3ec;vertical-align:middle;margin-right:6px}.meter i{display:block;height:100%;background:var(--grn)}.meter i.l{background:var(--red)}
-#qrwrap .fsinfo{display:none}
-#qrwrap:fullscreen{background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
-#qrwrap:fullscreen .qr{width:min(76vh,90vw);border:0}
-#qrwrap:fullscreen .bar{width:min(76vh,90vw)}
-#qrwrap:fullscreen .fsinfo{display:block;font:700 clamp(18px,3.4vh,34px) Georgia,serif;color:var(--navy);text-align:center}
-.ok{color:var(--grn);font-weight:700}.wait{color:var(--mut)}
 footer{text-align:center;color:var(--mut);font-size:12px;padding:10px 0 24px}
 footer a{color:var(--navy);cursor:pointer}
 @media(max-width:760px){.grid{grid-template-columns:1fr}.view{padding:12px}}
@@ -68,15 +62,11 @@ footer a{color:var(--navy);cursor:pointer}
   <div class="form">
     <label>Course<select id="s-course"></select></label>
     <label>Date<input type="date" id="s-date"></label>
-    <label>Start time<input type="time" id="s-start" style="min-width:110px"></label>
-    <label>Slot length<select id="s-dur" style="min-width:110px"><option value="30">30 min</option><option value="45">45 min</option><option value="60" selected>1 hour</option><option value="90">1.5 hours</option><option value="120">2 hours</option></select></label>
-    <label>QR changes every (sec)<input type="number" id="s-rot" value="10" min="5" max="120" style="min-width:100px"></label>
-    <label>QR active for (min)<input type="number" id="s-win" value="2" min="1" max="60" style="min-width:100px"></label>
     <label>From session plan<select id="s-plan"><option value="">-- none --</option></select></label>
     <label>Topic<input id="s-topic" style="min-width:230px"></label>
     <button id="s-add">Create Session</button>
   </div>
-  <table><thead><tr><th>ID</th><th>Date and slot</th><th>Course</th><th>Topic</th><th>Status</th><th>Present</th><th>Action</th></tr></thead>
+  <table><thead><tr><th>ID</th><th>Date</th><th>Course</th><th>Topic</th><th>Status</th><th>Present</th><th>Action</th></tr></thead>
   <tbody id="s-rows"></tbody></table>
 </section>
 
@@ -86,17 +76,14 @@ footer a{color:var(--navy);cursor:pointer}
   <div id="live-on" hidden>
     <p id="live-info"></p>
     <div class="grid">
+      <div><div class="qr" id="qr"></div><div class="bar"><i id="bar"></i></div>
+        <p class="note">QR changes every 10 seconds.</p></div>
       <div>
-        <div id="qrwrap"><div class="fsinfo" id="fs-top"></div><div class="qr" id="qr"></div><div class="bar"><i id="bar"></i></div><div class="fsinfo" id="fs-bot"></div></div>
-        <p><button class="alt" id="fs">Full screen QR</button></p>
-        <p class="note" id="qr-note"></p>
-      </div>
-      <div>
-        <div class="stat"><div><b id="l-n">0</b>Present</div><div><b id="l-t">0:00</b>Time left</div><div><b id="l-a">0</b>Alerts</div></div>
+        <div class="stat"><div><b id="l-n">0</b>Scanned</div><div><b id="l-a">0</b>Alerts</div></div>
         <button class="danger" id="l-close">Close Session</button>
         <h3>Proxy / device alerts</h3><div id="l-alerts"></div>
-        <h3>Class roster (updates live)</h3>
-        <table><thead><tr><th>Roll</th><th>Name</th><th>Device</th><th>Attendance</th><th>Time</th></tr></thead><tbody id="l-rows"></tbody></table>
+        <h3>Attendance received</h3>
+        <table><thead><tr><th>Roll</th><th>Name</th><th>Time</th></tr></thead><tbody id="l-rows"></tbody></table>
       </div>
     </div>
   </div>
@@ -154,15 +141,15 @@ function show(v,id){cur=v;if(id)did=id;
 document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>show(a.dataset.v));
 const load=()=>run({sessions:loadSessions,live:loadLive,detail:loadDetail,analytics:loadAnalytics,plan:loadPlan}[cur]);
 
-async function renderSessions(){
+async function loadSessions(){
   const rows=await api('GET','/sessions');
-  $('s-rows').innerHTML=rows.map(s=>`<tr><td>${s.id}</td><td>${esc(s.date)}<br>${esc(s.start_time)} &ndash; ${esc(s.end_time)}</td><td>${esc(s.course)}</td><td>${esc(s.topic)}</td>
+  $('s-rows').innerHTML=rows.map(s=>`<tr><td>${s.id}</td><td>${esc(s.date)}</td><td>${esc(s.course)}</td><td>${esc(s.topic)}</td>
    <td class="st ${s.status}">${s.status}</td><td>${s.status==='SCHEDULED'?'-':s.present+' / '+s.total}</td>
    <td>${s.status==='SCHEDULED'?`<button class="sm" onclick="startS(${s.id})">Start</button>`:
         s.status==='OPEN'?`<button class="sm" onclick="show('live')">Open live</button>`:
         `<button class="sm alt" onclick="show('detail',${s.id})">View</button>`}</td></tr>`).join('');
+  fillPlanSelect();
 }
-async function loadSessions(){await renderSessions();fillPlanSelect()}
 async function fillPlanSelect(){
   PL=await api('GET','/plan');const c=$('s-course').value;
   $('s-plan').innerHTML='<option value="">-- none --</option>'+PL.filter(p=>p.course_id==c&&p.status==='PLANNED')
@@ -171,28 +158,19 @@ async function fillPlanSelect(){
 $('s-course').onchange=fillPlanSelect;
 $('s-plan').onchange=()=>{const p=PL.find(x=>x.id==$('s-plan').value);if(p){$('s-topic').value=p.topic;$('s-date').value=p.planned_date}};
 $('s-add').onclick=()=>run(async()=>{
-  await api('POST','/sessions',{course_id:+$('s-course').value,topic:$('s-topic').value,date:$('s-date').value,plan_id:$('s-plan').value?+$('s-plan').value:null,
-    start_time:$('s-start').value,duration_min:+$('s-dur').value,rotation_seconds:+$('s-rot').value,window_seconds:Math.round($('s-win').value*60)});
+  await api('POST','/sessions',{course_id:+$('s-course').value,topic:$('s-topic').value,date:$('s-date').value,plan_id:$('s-plan').value?+$('s-plan').value:null});
   $('s-topic').value='';loadSessions()});
 const startS=id=>run(async()=>{await api('POST',`/sessions/${id}/start`);show('live')});
 
-const mmss=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
 async function loadLive(){
   const d=await api('GET','/live'),on=!!d.session;
   $('live-none').hidden=on;$('live-on').hidden=!on;if(!on)return;
-  const S=d.session,n=d.roster.filter(r=>r.present).length;
-  $('live-info').innerHTML=`<b>${esc(S.course)}</b> &middot; ${esc(S.topic)} &middot; Session ${S.id} &middot; ${esc(S.date)} ${esc(S.start_time)}&ndash;${esc(S.end_time)}`;
-  $('qr').innerHTML=d.qr_svg||'<p style="padding:50px 10px;text-align:center"><b>Attendance window ended</b><br>Close the session to continue.</p>';
-  $('bar').style.width=d.qr_svg?d.expires_in/S.rotation_seconds*100+'%':'0%';
-  $('l-n').textContent=n+' / '+d.roster.length;$('l-t').textContent=mmss(d.remaining);$('l-a').textContent=d.alerts.length;
-  $('qr-note').textContent=`QR changes every ${S.rotation_seconds} seconds. Attendance stays open for ${mmss(S.window_seconds)} minutes.`;
-  $('fs-top').textContent=`${S.course} \u00b7 ${n} of ${d.roster.length} present`;
-  $('fs-bot').textContent=d.qr_svg?`Time left ${mmss(d.remaining)} \u00b7 QR changes every ${S.rotation_seconds}s`:'Attendance window ended';
-  $('l-rows').innerHTML=d.roster.map(r=>`<tr><td>${esc(r.uid)}</td><td>${esc(r.name)}</td><td class="${r.device?'ok':'wait'}">${r.device?'Registered':'Not registered'}</td>
-    <td class="${r.present?'ok':'wait'}">${r.present?'PRESENT':'Waiting'}</td><td>${esc(r.time)}</td></tr>`).join('');
+  $('live-info').innerHTML=`<b>${esc(d.session.course)}</b> · ${esc(d.session.topic)} · Session ${d.session.id}`;
+  $('qr').innerHTML=d.qr_svg;$('bar').style.width=d.expires_in*10+'%';
+  $('l-n').textContent=d.scans.length;$('l-a').textContent=d.alerts.length;
+  $('l-rows').innerHTML=d.scans.map(s=>`<tr><td>${esc(s.uid)}</td><td>${esc(s.name)}</td><td>${esc(s.time)}</td></tr>`).join('')||'<tr><td colspan="3">No attendance received yet.</td></tr>';
   $('l-alerts').innerHTML=alerts(d.alerts);
 }
-$('fs').onclick=()=>document.fullscreenElement?document.exitFullscreen():$('qrwrap').requestFullscreen();
 const alerts=a=>a.length?a.map(x=>`<div class="warn"><b>Proxy attempt</b> for ${esc(x.name)} (${esc(x.uid)}) at ${esc(x.time)} &mdash; ${esc(x.kind)}<br>
   Device used: <code>${esc(x.attempted_device)}</code> &nbsp; Registered device: <code>${esc(x.registered_device)}</code></div>`).join(''):'<p class="note">No suspicious attempts recorded.</p>';
 $('l-close').onclick=()=>run(async()=>{if(!confirm('Close this session? Students who have not scanned will be marked absent.'))return;
@@ -201,7 +179,7 @@ $('l-close').onclick=()=>run(async()=>{if(!confirm('Close this session? Students
 async function loadDetail(){
   const s=await api('GET','/sessions/'+did),ed=['CLOSED','SAVED','SUBMITTED'].includes(s.status);
   $('d-title').textContent=`Session ${s.id} · ${s.course}`;
-  $('d-info').innerHTML=`Date: ${esc(s.date)} ${esc(s.start_time)}&ndash;${esc(s.end_time)} · Topic: ${esc(s.topic)} · Status: <span class="st ${s.status}">${s.status}</span> · Present: <b>${s.present} / ${s.total}</b>`;
+  $('d-info').innerHTML=`Date: ${esc(s.date)} · Topic: ${esc(s.topic)} · Status: <span class="st ${s.status}">${s.status}</span> · Present: <b>${s.present} / ${s.total}</b>`;
   $('d-btns').innerHTML=s.status==='CLOSED'?'<button onclick="mv(\'save\')">Save Attendance</button>':
     s.status==='SAVED'?'<button onclick="mv(\'submit\')">Submit Final Attendance</button>':
     s.status==='SUBMITTED'?'<span class="note">Submitted. Further edits are logged as post-submit changes.</span>':'';
@@ -238,8 +216,7 @@ $('reset').onclick=()=>run(async()=>{if(confirm('Unbind all registered student d
 
 (async()=>{C=await api('GET','/courses');['s-course','a-course','p-course'].forEach(i=>$(i).innerHTML=opts());
   $('s-date').value=$('p-date').value=new Date().toISOString().slice(0,10);
-  const nx=new Date();nx.setMinutes(0,0,0);nx.setHours(nx.getHours()+1);$('s-start').value=nx.toTimeString().slice(0,5);
-  show('sessions');setInterval(()=>{if(cur==='live')load();else if(cur==='sessions')run(renderSessions)},cur==='live'?1000:1000)})();
+  show('sessions');setInterval(()=>{if(cur==='live')load()},1000)})();
 </script>
 </body>
 </html>
