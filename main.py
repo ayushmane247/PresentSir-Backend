@@ -15,11 +15,15 @@ BASE = Path(__file__).parent
 DB = BASE / "devices.json"
 SECRET = secrets.token_bytes(32)
 
-NAMES = [("ayush", "Ayush Mane", "A45"), ("riya", "Riya Patil", "A12"), ("karan", "Karan Shah", "A31"),
-         ("sneha", "Sneha Jadhav", "A07"), ("omkar", "Omkar Patil", "A22"), ("pooja", "Pooja Kulkarni", "A38"),
-         ("rahul", "Rahul Deshmukh", "A41"), ("neha", "Neha Shinde", "A16")]
+# Student table (login id, name, roll no). Password for everyone: 1234
+NAMES = [("ayush", "Ayush Mane", "A45"), ("ashish", "Ashish Warang", "A47"),
+         ("pushkar", "Pushkar Mahadik", "A29"), ("arshad", "Arshad Mahalkari", "A03"),
+         ("riya", "Riya Patil", "A12"), ("karan", "Karan Shah", "A31"),
+         ("sneha", "Sneha Jadhav", "A07"), ("omkar", "Omkar Patil", "A22"),
+         ("pooja", "Pooja Kulkarni", "A38"), ("neha", "Neha Shinde", "A16")]
 USERS = {l: {"password": "1234", "name": n, "uid": u} for l, n, u in NAMES}
 ROSTER = sorted(USERS.values(), key=lambda u: u["uid"])
+LOGIN_BY_UID = {u["uid"]: l for l, u in USERS.items()}
 COURSES = [{"id": 1, "name": "Android App Development", "code": "231CSEOECL302", "faculty": "Dr. Sunny Baburao Mohite"},
            {"id": 2, "name": "Cloud Computing", "code": "231AIMLPCCL303", "faculty": "Ms. Snehalata Krishnakant Choudhari"},
            {"id": 3, "name": "Database Engineering", "code": "231AIMLPCCL302", "faculty": "Ms. Priyanka Ramesh Bhatmare"}]
@@ -67,6 +71,10 @@ class SessionReq(BaseModel):
     topic: str
     date: str
     plan_id: int | None = None
+    start_time: str = "10:00"          # HH:MM
+    duration_min: int = 60
+    rotation_seconds: int = 10         # how often the QR changes
+    window_seconds: int = 120          # how long attendance stays open
 
 
 class RecordReq(BaseModel):
@@ -99,9 +107,20 @@ def open_session():
     return next((s for s in SESSIONS.values() if s["status"] == "OPEN"), None)
 
 
-def new_session(cid, topic, date, plan_id=None, status="SCHEDULED"):
+def to_min(hhmm):
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def to_hhmm(mins):
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def new_session(cid, topic, date, plan_id=None, status="SCHEDULED", start="10:00", end="11:00",
+                rot=10, win=120):
     NID["s"] += 1
     s = {"id": NID["s"], "course_id": cid, "topic": topic, "date": date, "plan_id": plan_id,
+         "start_time": start, "end_time": end, "rotation_seconds": rot, "window_seconds": win,
          "status": status, "scans": [], "alerts": [], "records": {}, "log": []}
     SESSIONS[s["id"]] = s
     return s
@@ -113,7 +132,8 @@ def summary(s):
     c = course(s["course_id"])
     return {"id": s["id"], "course_id": c["id"], "course": c["name"], "code": c["code"], "date": s["date"],
             "topic": s["topic"], "status": s["status"], "present": pres, "total": len(ROSTER),
-            "alerts": len(s["alerts"])}
+            "alerts": len(s["alerts"]), "start_time": s["start_time"], "end_time": s["end_time"],
+            "rotation_seconds": s["rotation_seconds"], "window_seconds": s["window_seconds"]}
 
 
 def seed():
@@ -121,7 +141,8 @@ def seed():
     topics = ["Introduction", "Activities and Intents", "Jetpack Compose basics", "Navigation", "Networking"]
     for cid in (1, 2, 3):
         for i, t in enumerate(topics):
-            s = new_session(cid, t, f"2026-09-{8 + i * 3:02d}", status="SUBMITTED")
+            s = new_session(cid, t, f"2026-09-{8 + i * 3:02d}", status="SUBMITTED",
+                            start=f"{8 + cid:02d}:00", end=f"{9 + cid:02d}:00")
             for u in ROSTER:
                 p = rnd.random() < (0.55 if u["uid"] in ("A07", "A22") else 0.88)
                 s["records"][u["uid"]] = {"status": "PRESENT" if p else "ABSENT",
@@ -143,8 +164,8 @@ def user_from(auth):
     return login
 
 
-def window():
-    return int(time.time() // ROTATE)
+def step(s):
+    return int((time.time() - s["opened_at"]) // s["rotation_seconds"])
 
 
 def qr_for(s, w):
@@ -159,7 +180,7 @@ def check_qr(s, token):
     w = int(p[2])
     if not hmac.compare_digest(qr_for(s, w), token):
         raise ApiError("QR_INVALID", "QR code is not valid for this session")
-    if w not in (window(), window() - 1):
+    if w not in (step(s), step(s) - 1):
         raise ApiError("QR_EXPIRED", "QR expired, scan the latest one")
 
 
@@ -198,6 +219,8 @@ def submit(req: SubmitReq, authorization: str | None = Header(None)):
     s = open_session()
     if not s:
         raise ApiError("SESSION_NOT_OPEN", "Attendance session is not open")
+    if time.time() > s["ends_at"]:
+        raise ApiError("WINDOW_CLOSED", "The attendance window has ended")
     if req.session_id != s["id"]:
         raise ApiError("QR_INVALID", "QR belongs to a different session")
     check_qr(s, req.qr_token)
@@ -266,14 +289,28 @@ def courses():
 
 @app.get("/api/sessions")
 def list_sessions():
-    return [summary(s) for s in sorted(SESSIONS.values(), key=lambda s: -s["id"])]
+    return [summary(s) for s in sorted(SESSIONS.values(), key=lambda s: (s["date"], s["start_time"], s["id"]), reverse=True)]
 
 
 @app.post("/api/sessions")
 def create(req: SessionReq):
     if not req.topic.strip():
         raise ApiError("VALIDATION_ERROR", "Topic is required")
-    return summary(new_session(req.course_id, req.topic.strip(), req.date, req.plan_id))
+    if not (5 <= req.rotation_seconds <= 120) or not (30 <= req.window_seconds <= 3600) \
+            or not (15 <= req.duration_min <= 240):
+        raise ApiError("VALIDATION_ERROR", "Check rotation (5-120 s), QR time (30 s-60 min) and slot length")
+    try:
+        a = to_min(req.start_time)
+    except ValueError:
+        raise ApiError("VALIDATION_ERROR", "Start time must be HH:MM")
+    b = a + req.duration_min
+    if b > 24 * 60:
+        raise ApiError("VALIDATION_ERROR", "Slot must end before midnight")
+    for o in SESSIONS.values():
+        if o["date"] == req.date and o["status"] != "CANCELLED" and a < to_min(o["end_time"]) and to_min(o["start_time"]) < b:
+            raise ApiError("SLOT_OVERLAP", f"Slot overlaps session {o['id']} ({o['start_time']}-{o['end_time']})")
+    return summary(new_session(req.course_id, req.topic.strip(), req.date, req.plan_id, start=req.start_time,
+                               end=to_hhmm(b), rot=req.rotation_seconds, win=req.window_seconds))
 
 
 @app.get("/api/sessions/{sid}")
@@ -293,6 +330,8 @@ def start(sid: int):
     if open_session():
         raise ApiError("INVALID_STATE", "Another session is already open")
     s["status"] = "OPEN"
+    s["opened_at"] = time.time()
+    s["ends_at"] = s["opened_at"] + s["window_seconds"]
     NONCES.clear()
     return summary(s)
 
@@ -353,9 +392,16 @@ def live():
     s = open_session()
     if not s:
         return {"session": None}
-    svg = segno.make(qr_for(s, window()), error="m").svg_inline(scale=8, border=2, dark="#1d3b6f", light="#ffffff")
-    return {"session": summary(s), "qr_svg": svg, "expires_in": round(ROTATE - (time.time() % ROTATE), 1),
-            "scans": s["scans"], "alerts": s["alerts"]}
+    left = max(0, round(s["ends_at"] - time.time()))
+    svg = None
+    if left > 0:
+        svg = segno.make(qr_for(s, step(s)), error="m").svg_inline(scale=8, border=2, dark="#1d3b6f", light="#ffffff")
+    rot = s["rotation_seconds"]
+    scanned = {x["uid"]: x for x in s["scans"]}
+    roster = [{"uid": u["uid"], "name": u["name"], "device": LOGIN_BY_UID[u["uid"]] in DEVICES,
+               "present": u["uid"] in scanned, "time": scanned.get(u["uid"], {}).get("time", "")} for u in ROSTER]
+    return {"session": summary(s), "qr_svg": svg, "expires_in": round(rot - ((time.time() - s["opened_at"]) % rot), 1),
+            "remaining": left, "roster": roster, "scans": s["scans"], "alerts": s["alerts"]}
 
 
 @app.get("/api/analytics/{cid}")
